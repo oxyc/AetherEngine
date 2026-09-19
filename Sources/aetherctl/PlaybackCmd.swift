@@ -1180,7 +1180,10 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
             print("  HOSTCALL setNativeSubtitleRendering(true)")
             engine.setNativeSubtitleRendering(true)
         }
-        if let t = nativeRenderTick, tick == t + 2 { await reportLegibleSelection(engine, "after render on") }
+        if let t = nativeRenderTick, tick == t + 2 {
+            await reportLegibleSelection(engine, "after render on")
+            await reportServedVTT(engine, "after render on", around: engine.currentTime)
+        }
         if let subsOffTick, tick == subsOffTick {
             print("  HOSTCALL subtitles off")
             engine.clearSubtitle()
@@ -1198,7 +1201,10 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
         // seconds rather than a runloop turn. Reading at +1 caught the off correctly and reported
         // every on as a failure, which is the harness lying in the more expensive direction.
         if let t = subsOffTick, tick == t + 1 { await reportLegibleSelection(engine, "after off") }
-        if let t = subsOnTick, tick == t + 4 { await reportLegibleSelection(engine, "after on") }
+        if let t = subsOnTick, tick == t + 4 {
+            await reportLegibleSelection(engine, "after on")
+            await reportServedVTT(engine, "after on", around: engine.currentTime)
+        }
     }
 
     let finalTime = engine.currentTime
@@ -1381,4 +1387,77 @@ private func reportLegibleSelection(_ engine: AetherEngine, _ label: String) asy
     let name = selection.map { $0.displayName } ?? "none"
     print("  LEGIBLE \(label): selected=\(name) options=\(group.options.count) "
           + "engineActive=\(engine.activeSubtitleTrackIndex.map(String.init) ?? "nil")")
+}
+
+/// Sodalite#156 round 2: what the RECEIVER would actually get, which is not the same question as
+/// whether a selection is held.
+///
+/// The first version of this harness asked `currentMediaSelection` and called a run green when it
+/// read back the language the host picked. On the device the same transition produced a caption box
+/// with no text in it, so the selection was held and the payload behind it was empty. AVKit fetches
+/// the whole forward window in one burst at selection and never re-fetches a segment it already has,
+/// which makes the payload at that instant the only thing that matters.
+///
+/// So this fetches the served WebVTT the way a receiver does: master -> the selected rendition's
+/// media playlist -> the segments covering the playhead, and counts CUE TEXT, not segments.
+@MainActor
+private func reportServedVTT(_ engine: AetherEngine, _ label: String, around playhead: Double) async {
+    guard let item = engine.currentAVPlayerItem,
+          let asset = item.asset as? AVURLAsset else {
+        print("  VTT \(label): no item")
+        return
+    }
+    let master = asset.url
+    func get(_ url: URL) async -> String? {
+        guard let (data, _) = try? await URLSession.shared.data(from: url) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+    guard let masterBody = await get(master) else {
+        print("  VTT \(label): master unreachable at \(master.absoluteString)")
+        return
+    }
+    // The rendition AVPlayer is on, named by the legible selection so the harness follows the same
+    // pick the receiver does rather than guessing an ordinal.
+    var wantedName: String?
+    if let group = try? await item.asset.loadMediaSelectionGroup(for: .legible) {
+        wantedName = item.currentMediaSelection.selectedMediaOption(in: group)?.displayName
+    }
+    let renditions: [(name: String, uri: String)] = masterBody
+        .split(separator: "\n")
+        .filter { $0.hasPrefix("#EXT-X-MEDIA:TYPE=SUBTITLES") }
+        .compactMap { line in
+            func field(_ key: String) -> String? {
+                guard let r = line.range(of: "\(key)=\"") else { return nil }
+                let rest = line[r.upperBound...]
+                guard let end = rest.firstIndex(of: "\"") else { return nil }
+                return String(rest[..<end])
+            }
+            guard let name = field("NAME"), let uri = field("URI") else { return nil }
+            return (name, uri)
+        }
+    guard let pick = renditions.first(where: { $0.name == wantedName }) ?? renditions.first else {
+        print("  VTT \(label): no SUBTITLES rendition in the master")
+        return
+    }
+    guard let media = await get(master.deletingLastPathComponent().appendingPathComponent(pick.uri)) else {
+        print("  VTT \(label): \(pick.uri) unreachable")
+        return
+    }
+    let segments = media.split(separator: "\n").filter { $0.hasSuffix(".vtt") }.map(String.init)
+    // Segment index from the playhead: the playlist is uniform 4 s here, and the burst AVKit takes
+    // starts at the playhead, so this is the stretch whose emptiness the viewer would see.
+    let first = max(0, Int(playhead / 4.0) - Int(media.contains("EXT-X-MEDIA-SEQUENCE") ? 0 : 0))
+    var checked = 0, nonEmpty = 0, cues = 0
+    for name in segments where checked < 8 {
+        guard let n = Int(name.split(separator: "_").last?.split(separator: ".").first ?? ""),
+              n >= first, n < first + 12 else { continue }
+        checked += 1
+        guard let body = await get(master.deletingLastPathComponent().appendingPathComponent(name)) else { continue }
+        // A cue is a timestamp line plus text under it; counting "-->" counts cues without parsing.
+        let c = body.components(separatedBy: "-->").count - 1
+        cues += c
+        if c > 0 { nonEmpty += 1 }
+    }
+    print("  VTT \(label): rendition=\(pick.name) segments=\(checked) nonEmpty=\(nonEmpty) cues=\(cues)"
+          + (checked > 0 && nonEmpty == 0 ? "   <- a caption box with nothing in it" : ""))
 }
