@@ -688,6 +688,7 @@ final class NativeAVPlayerHost {
                         // #168: the video track can be absent from item.tracks at readyToPlay for HLS;
                         // re-read once playing so the remote-HLS badge settles on the real dynamic range.
                         await self.publishDetectedVideoFormat(from: item)
+                        await Self.dumpAVPlayerView(item: item, player: self.avPlayer, sid: sid)
                     }
                 }
             }
@@ -2037,7 +2038,14 @@ final class NativeAVPlayerHost {
             return
         }
         for itemTrack in tracks {
-            guard let assetTrack = itemTrack.assetTrack else { continue }
+            // A track whose `assetTrack` has not resolved yet used to be skipped without a word, which is
+            // how a readyToPlay with no video line looked identical to one with no video track at all.
+            guard let assetTrack = itemTrack.assetTrack else {
+                EngineLog.emit(
+                    "[NativeAVPlayerHost] #\(sid) item.tracks entry with no assetTrack yet "
+                    + "enabled=\(itemTrack.isEnabled) (readyToPlay)", category: .engine)
+                continue
+            }
             let fourcc: String
             var extra = ""
             if let cm = (try? await assetTrack.load(.formatDescriptions))?.first {
@@ -2064,6 +2072,72 @@ final class NativeAVPlayerHost {
                 category: .engine
             )
         }
+    }
+
+    /// Once per session, 2.5 s after the first `.playing` (the point the video track is reliably in
+    /// `item.tracks`, unlike readyToPlay): what AVPlayer made of the served item, then the fingerprint
+    /// line. Always prints, including when there is no video track, and never changes playback.
+    ///
+    /// `asset.load(.tracks)` reads 0 for every HLS item: AVFoundation does not populate `AVAsset.tracks`
+    /// for HTTP Live Streaming, so that count says nothing about the stream. `item.tracks` is the list to
+    /// read, and this line is what the old `item.videoTrack` line was meant to be.
+    private static func dumpAVPlayerView(item: AVPlayerItem, player: AVPlayer, sid: Int) async {
+        let tag = "[NativeAVPlayerHost] #\(sid) AS AVPLAYER SEES IT:"
+        let entries = item.tracks
+        var video = "videoTrack=none (item.tracks=\(entries.count), assetTracks=\(entries.compactMap(\.assetTrack).count))"
+        for itemTrack in entries {
+            guard let assetTrack = itemTrack.assetTrack, assetTrack.mediaType == .video else { continue }
+            let hdr = ((try? await assetTrack.load(.mediaCharacteristics)) ?? []).contains(.containsHDRVideo)
+            guard let cm = (try? await assetTrack.load(.formatDescriptions))?.first else {
+                video = "videoTrack no formatDescription containsHDRVideo=\(hdr)"
+                break
+            }
+            let ext = CMFormatDescriptionGetExtensions(cm) as? [String: Any] ?? [:]
+            let atoms = (ext[kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms as String]
+                         as? [String: Any] ?? [:])
+                .map { key, value -> String in
+                    if let data = value as? Data {
+                        return key == "dvcC" || key == "dvvC"
+                            ? "\(key)=\(data.map { String(format: "%02x", $0) }.joined())"
+                            : "\(key)(\(data.count))"
+                    }
+                    return key
+                }.sorted().joined(separator: " ")
+            video = "videoTrack subtype='\(fourccString(CMFormatDescriptionGetMediaSubType(cm)))' "
+                + videoFormatDescription(cm)
+                + " atoms=[\(atoms)] extKeys=\(ext.keys.sorted()) containsHDRVideo=\(hdr)"
+            break
+        }
+        EngineLog.emit("\(tag) \(video) presentationSize=\(item.presentationSize)", category: .engine)
+
+        var variants = "variants=unavailable"
+        if let urlAsset = item.asset as? AVURLAsset, let list = try? await urlAsset.load(.variants) {
+            variants = "variants(\(list.count))=" + list.map { v in
+                let attrs = v.videoAttributes
+                return "[range=\(attrs.map { "\($0.videoRange)" } ?? "nil") "
+                    + "codecs=\(attrs?.codecTypes.map { fourccString($0) } ?? []) "
+                    + "fps=\(attrs?.nominalFrameRate.map { String(format: "%.3f", $0) } ?? "nil")]"
+            }.joined(separator: " ")
+                + " (the selected variant is not exposed; a single-variant master has one)"
+        }
+        var access = "accessLog=nil"
+        if let last = item.accessLog()?.events.last {
+            access = "accessLog.last indicatedBitrate=\(Int(last.indicatedBitrate)) "
+                + "playbackType=\(last.playbackType ?? "nil") mediaRequests=\(last.numberOfMediaRequests)"
+        }
+        #if os(tvOS) || os(iOS)
+        let hdrModes = AVPlayer.availableHDRModes
+        let modes = "hlg=\(hdrModes.contains(.hlg)) hdr10=\(hdrModes.contains(.hdr10)) "
+            + "dolbyVision=\(hdrModes.contains(.dolbyVision))"
+        #else
+        let modes = "unavailable on this platform"
+        #endif
+        EngineLog.emit(
+            "\(tag) \(variants) \(access) eligibleForHDRPlayback=\(AVPlayer.eligibleForHDRPlayback) "
+            + "availableHDRModes[\(modes)] asset.tracks=0-is-normal-for-HLS",
+            category: .engine)
+        EngineLog.emit("[NativeAVPlayerHost] #\(sid) " + PlaybackFingerprint.shared.line(route: "native"),
+                       category: .engine)
     }
 
     /// AE#293: read the carriage off the source itself (playlist plus, where the playlists cannot settle

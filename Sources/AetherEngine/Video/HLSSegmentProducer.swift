@@ -2050,6 +2050,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             "[HLSSegmentProducer] init.mp4 captured (\(initBytes.count) B)",
                             category: .session
                         )
+                        EngineLog.emit("[HLSSegmentProducer] AS SERVED " + MP4Inspect.describeInit(initBytes),
+                                       category: .engine)
                     }
                 }
             )

@@ -263,7 +263,19 @@ final class SegmentCache: @unchecked Sendable {
         return true
     }
 
+    /// The first media segment of the session is summarised once for the log (`MP4Inspect`).
+    private var firstSegmentShapeLogged = false
+
+    private func logFirstSegmentShape(index: Int, data: () -> Data?) {
+        guard !firstSegmentShapeLogged else { return }
+        firstSegmentShapeLogged = true
+        guard let bytes = data() else { return }
+        EngineLog.emit("[SegmentCache] AS SERVED seg-\(index) " + MP4Inspect.describeFragment(bytes),
+                       category: .engine)
+    }
+
     func store(index: Int, data: Data) {
+        logFirstSegmentShape(index: index) { data }
         let fileURL = sessionDir.appendingPathComponent("seg-\(index).m4s")
         var writeOK: Bool
         do {
@@ -311,6 +323,7 @@ final class SegmentCache: @unchecked Sendable {
     /// `videoReach` (AE#412) is what this segment's video offers a cold arrival; nil leaves the
     /// previous claim in place only if the index is re-adopted without one, which no caller does.
     func adopt(index: Int, stagingPath: URL, byteCount: Int, videoReach: VideoReach? = nil) {
+        logFirstSegmentShape(index: index) { try? Data(contentsOf: stagingPath, options: .mappedIfSafe) }
         let fileURL = sessionDir.appendingPathComponent("seg-\(index).m4s")
         var renameOK: Bool
         do {

@@ -806,6 +806,10 @@ final class DisplayCriteriaController {
             + "extensions=\(extensions != nil ? "HDR" : "none")",
             category: .engine
         )
+        PlaybackFingerprint.shared.set(
+            "displayMode",
+            "criteria=\(format)/\(fourccString(codecType))/\(Int(effectiveRate))Hz "
+            + "extensions=\(extensions != nil ? "HDR" : "none")")
         // SDR rate-only switches are sub-second; only HDR criteria need the waitForSwitch delay.
         return isHDR ? .willSwitch : .applied
         #else
@@ -1191,6 +1195,39 @@ final class DisplayCriteriaController {
     }
 
     // MARK: - Window resolution
+
+    /// One extra readout with playback running, since every other one is taken before the criteria are
+    /// written or cleared. Adds what the display manager and the screen will say about the mode the panel
+    /// is really in: `AVDisplayManager` has no current-mode readback, so the screen's own mode, refresh
+    /// ceiling and gamut stand in for it. Reads only; changes nothing.
+    func logDuringPlayback() {
+        #if os(tvOS)
+        guard let window = resolveWindow() else {
+            EngineLog.emit("[DisplayCriteria] panel readout during playback: no window", category: .engine)
+            return
+        }
+        logPanelReadout("during playback", window: window)
+        let screen = window.screen
+        let mode = screen.currentMode.map {
+            "\(Int($0.size.width))x\(Int($0.size.height)) pixelAspect=\(String(format: "%.2f", $0.pixelAspectRatio))"
+        } ?? "nil"
+        let gamut: String
+        switch window.traitCollection.displayGamut {
+        case .SRGB: gamut = "sRGB"
+        case .P3: gamut = "P3"
+        case .unspecified: gamut = "unspecified"
+        @unknown default: gamut = "unknown"
+        }
+        let manager = window.avDisplayManager
+        let summary = "screenMode=\(mode) maxFPS=\(screen.maximumFramesPerSecond) displayGamut=\(gamut) "
+            + "switching=\(manager.isDisplayModeSwitchInProgress) matching=\(manager.isDisplayCriteriaMatchingEnabled) "
+            + "edr=\(String(format: "%.2f", screen.currentEDRHeadroom)) "
+            + "lastCriteria=\(lastApplied.map { "hdr=\($0.isHDR) codec=\(fourccString($0.codecType)) rate=\($0.effectiveRate)" } ?? "none") "
+            + "(AVDisplayManager exposes no current display mode)"
+        PlaybackFingerprint.shared.set("displayMode", summary)
+        EngineLog.emit("[DisplayCriteria] panel readout during playback (mode): \(summary)", category: .engine)
+        #endif
+    }
 
     #if os(tvOS)
     /// Emit the readout for one phase. Called before the engine writes or clears criteria, because a write

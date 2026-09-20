@@ -5833,6 +5833,10 @@ public final class AetherEngine: ObservableObject {
                 + "(nominal \(fmt(sample?.nominal))) player=\(fmt(playerRate.map(Double.init)))fps",
                 category: .engine
             )
+            // ~4 s after playback starts, so the readout sees the panel with HDR content composited.
+            try? await Task.sleep(for: .seconds(1.5))
+            guard !Task.isCancelled, self.loadGeneration == gen else { return }
+            self.displayCriteria.logDuringPlayback()
         }
         #endif
     }

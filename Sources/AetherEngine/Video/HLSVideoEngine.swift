@@ -1923,6 +1923,18 @@ public final class HLSVideoEngine: @unchecked Sendable {
             + "range=\(videoRange.rawValue) DV=\(dvVariant) segments=\(plan.count) "
             + "duration=\(String(format: "%.1f", durationSeconds))s"
         )
+        // Facts for the first-frame fingerprint line (`NativeAVPlayerHost`): what this session serves.
+        let fingerprint = PlaybackFingerprint.shared
+        fingerprint.set("sampleEntry", codecTagOverride ?? "source")
+        fingerprint.set("dvProfile", AetherEngine.dvConfig(stream: videoStream).map { "\($0.profile)" } ?? "none")
+        fingerprint.set("recordSource",
+                        dem.synthesizedDolbyVisionRecord ? "synthesized"
+                        : (AetherEngine.dvConfig(stream: videoStream) != nil ? "container" : "none"))
+        fingerprint.set("colr", p5ColorOverride.map {
+            "nclx \($0.primaries.rawValue)/\($0.trc.rawValue)/\($0.space.rawValue) "
+            + ($0.range == AVCOL_RANGE_JPEG ? "full" : "limited")
+        } ?? "none")
+        fingerprint.set("variant", manifestCodecs + (supplementalCodecs.map { " supplemental=\($0)" } ?? ""))
 
         let srv = HLSLocalServer(provider: prov)
         try srv.start()

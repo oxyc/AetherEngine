@@ -10,6 +10,12 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Added
+
+- **Debug logs for what a `dvh1` session serves, what AVPlayer sees and the panel mode:** the init's box
+  tree, a first-segment NAL histogram, the track's format description and HDR modes, a panel readout
+  during playback, and a one-line `fingerprint:`.
+
 ### Fixed
 
 - **A Dolby Vision Profile 5 source with no container record is recognised from its first RPU.** Such a
