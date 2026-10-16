@@ -287,6 +287,11 @@ final class NativeAVPlayerHost {
     /// Latched transport intent; the readyToPlay observer re-asserts it if play() was swallowed during a replaceCurrentItem swap (keepNativeHost reload: AVPlayer drops rate to 0 and parks at readyToPlay+paused forever).
     private var playIntent = false
     private var rateObservation: NSKeyValueObservation?
+    /// Whether the most recent rate transition came from an explicit `setRate`/`play`/`pause` call.
+    /// AVKit and MediaRemote use that path for viewer transport commands; an AVFoundation stall-driven
+    /// rate drop carries a different reason. This lets recovery protect a genuinely spurious pause without
+    /// fighting a hardware-remote pause that happens to land inside the recovery window.
+    private(set) var lastRateChangeWasExplicit = false
     private var timeControlObservation: NSKeyValueObservation?
     /// AE#440: the waiting REASON changes without `timeControlStatus` changing. A live join goes
     /// `waitingToPlay(EvaluatingBufferingRate)` -> `waitingToPlay(ToMinimizeStalls)` -> `playing`, and
@@ -729,6 +734,26 @@ final class NativeAVPlayerHost {
                 }
             }
         }
+
+        let rateReasonKey = AVPlayer.rateDidChangeReasonKey
+        let rateReasonObs = NotificationCenter.default.addObserver(
+            forName: AVPlayer.rateDidChangeNotification, object: avPlayer, queue: .main
+        ) { [weak self] note in
+            let reason = note.userInfo?[rateReasonKey]
+                as? AVPlayer.RateDidChangeReason
+            let explicit = reason == .setRateCalled
+            let reasonName = reason?.rawValue ?? "unknown"
+            MainActor.assumeIsolated {
+                guard let self, self.sessionID == sid else { return }
+                self.lastRateChangeWasExplicit = explicit
+                EngineLog.emit(
+                    "[NativeAVPlayerHost] #\(sid) rate reason=\(reasonName) "
+                    + "explicit=\(self.lastRateChangeWasExplicit)",
+                    category: .engine
+                )
+            }
+        }
+        notificationObservers.append(rateReasonObs)
 
         rateObservation = avPlayer.observe(\.rate, options: [.new]) { [weak self] player, _ in
             let rate = player.rate

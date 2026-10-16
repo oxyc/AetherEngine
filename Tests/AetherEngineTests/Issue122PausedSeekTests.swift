@@ -42,11 +42,13 @@ struct Issue122PausedSeekTests {
         // never fires even with the window open and the seek's paused landing present.
         #expect(!AetherEngine.shouldReassertPlayDuringRecovery(
             statusIsPaused: true, engineStateIsPlaying: false,
+            explicitRateChange: true,
             now: now, windowUntil: windowOpen, reasserts: 0))
         // Documents the pre-fix bug: the forced `.playing` (engineStateIsPlaying == true) DID fire
         // the reassert on the seek's own paused landing.
         #expect(AetherEngine.shouldReassertPlayDuringRecovery(
             statusIsPaused: true, engineStateIsPlaying: true,
+            explicitRateChange: false,
             now: now, windowUntil: windowOpen, reasserts: 0))
     }
 
@@ -58,6 +60,7 @@ struct Issue122PausedSeekTests {
         // still re-asserted (no regression to #93 recovery)...
         #expect(AetherEngine.shouldReassertPlayDuringRecovery(
             statusIsPaused: true, engineStateIsPlaying: true,
+            explicitRateChange: false,
             now: now, windowUntil: windowOpen, reasserts: 0))
         // ...and the reconcile overrides the spurious paused status back to playing.
         #expect(AetherEngine.seekRecoveredState(

@@ -3338,9 +3338,9 @@ public final class AetherEngine: ObservableObject {
     /// Pure decision for the tcs sink (#93 residual): re-assert play() instead of latching a pause?
     nonisolated static func shouldReassertPlayDuringRecovery(
         statusIsPaused: Bool, engineStateIsPlaying: Bool,
-        now: Date, windowUntil: Date, reasserts: Int
+        explicitRateChange: Bool, now: Date, windowUntil: Date, reasserts: Int
     ) -> Bool {
-        statusIsPaused && engineStateIsPlaying && now < windowUntil
+        statusIsPaused && engineStateIsPlaying && !explicitRateChange && now < windowUntil
             && reasserts < maxStallRecoveryReasserts
     }
 
@@ -3379,6 +3379,7 @@ public final class AetherEngine: ObservableObject {
         let shouldReassertPausedStatus = Self.shouldReassertPlayDuringRecovery(
             statusIsPaused: statusIsPaused,
             engineStateIsPlaying: transportIntentIsPlaying,
+            explicitRateChange: host.lastRateChangeWasExplicit,
             now: now,
             windowUntil: stallRecoveryWindowUntil,
             reasserts: stallRecoveryReasserts

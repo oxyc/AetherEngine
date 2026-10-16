@@ -1545,6 +1545,7 @@ extension AetherEngine {
                 if Self.shouldReassertPlayDuringRecovery(
                     statusIsPaused: status == .paused,
                     engineStateIsPlaying: self.state == .playing,
+                    explicitRateChange: host?.lastRateChangeWasExplicit ?? false,
                     now: Date(), windowUntil: self.stallRecoveryWindowUntil,
                     reasserts: self.stallRecoveryReasserts
                 ) {

@@ -277,16 +277,23 @@ extension SegmentFetchWaitTests {
         let open = now.addingTimeInterval(10)
         let closed = now.addingTimeInterval(-1)
         #expect(AetherEngine.shouldReassertPlayDuringRecovery(
-            statusIsPaused: true, engineStateIsPlaying: true, now: now, windowUntil: open, reasserts: 0))
+            statusIsPaused: true, engineStateIsPlaying: true, explicitRateChange: false,
+            now: now, windowUntil: open, reasserts: 0))
         #expect(!AetherEngine.shouldReassertPlayDuringRecovery(
-            statusIsPaused: true, engineStateIsPlaying: true, now: now, windowUntil: closed, reasserts: 0))
+            statusIsPaused: true, engineStateIsPlaying: true, explicitRateChange: true,
+            now: now, windowUntil: open, reasserts: 0))
         #expect(!AetherEngine.shouldReassertPlayDuringRecovery(
-            statusIsPaused: true, engineStateIsPlaying: true, now: now, windowUntil: open,
+            statusIsPaused: true, engineStateIsPlaying: true, explicitRateChange: false,
+            now: now, windowUntil: closed, reasserts: 0))
+        #expect(!AetherEngine.shouldReassertPlayDuringRecovery(
+            statusIsPaused: true, engineStateIsPlaying: true, explicitRateChange: false, now: now, windowUntil: open,
             reasserts: AetherEngine.maxStallRecoveryReasserts))
         #expect(!AetherEngine.shouldReassertPlayDuringRecovery(
-            statusIsPaused: true, engineStateIsPlaying: false, now: now, windowUntil: open, reasserts: 0))
+            statusIsPaused: true, engineStateIsPlaying: false, explicitRateChange: false,
+            now: now, windowUntil: open, reasserts: 0))
         #expect(!AetherEngine.shouldReassertPlayDuringRecovery(
-            statusIsPaused: false, engineStateIsPlaying: true, now: now, windowUntil: open, reasserts: 0))
+            statusIsPaused: false, engineStateIsPlaying: true, explicitRateChange: false,
+            now: now, windowUntil: open, reasserts: 0))
     }
 }
 
