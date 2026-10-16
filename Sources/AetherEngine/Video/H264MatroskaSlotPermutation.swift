@@ -165,6 +165,12 @@ enum H264MatroskaSlotPermutation {
                     reconstructable = false
                     break
                 }
+                // A reconstruction that would present a picture before it is decoded describes some
+                // other stream, and handing it out would break the decoder instead of the cadence.
+                guard expectedPTS >= expectedDTS else {
+                    reconstructable = false
+                    break
+                }
                 if sample.pts != expectedPTS {
                     let (forward, overflow) = sample.pts.subtractingReportingOverflow(expectedPTS)
                     guard !overflow, sample.pts == sample.dts, forward == step,
@@ -219,6 +225,13 @@ enum H264MatroskaSlotPermutation {
         private var anchorPTS: Int64?
         private var decodeIndex: Int64 = 0
 
+        // Spelled out: before Swift 6.4 the private stored properties made the memberwise init private (#787).
+        init(step: Int64, pocStep: Int64, videoDelay: Int) {
+            self.step = step
+            self.pocStep = pocStep
+            self.videoDelay = videoDelay
+        }
+
         mutating func noteSeek() {
             anchorPTS = nil
             decodeIndex = 0
@@ -249,6 +262,10 @@ enum H264MatroskaSlotPermutation {
                     anchor: anchorPTS, index: decodeIndex - Int64(videoDelay), step: step)
             else {
                 brokenReason = "timestamp reconstruction overflowed"
+                return nil
+            }
+            guard expectedPTS >= expectedDTS else {
+                brokenReason = "reconstructed pts=\(expectedPTS) precedes dts=\(expectedDTS)"
                 return nil
             }
 
