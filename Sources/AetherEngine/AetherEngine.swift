@@ -5429,16 +5429,11 @@ public final class AetherEngine: ObservableObject {
     public func pause() {
         recordTransportDuringRebuild(playing: false)
         resumeAfterInterruption = false
-        // Publish explicit user intent before AVPlayer emits its synchronous `.paused` KVO update. During
-        // a stall-recovery window that observer deliberately fights spontaneous AVPlayer pauses while the
-        // engine still intends to play; pausing the host first made a real user press indistinguishable from
-        // that failure and immediately called play() again. Spontaneous pauses still see `.playing` and keep
-        // the existing recovery behavior.
+        activeTransportHost?.pause()
+        isBuffering = false
         if state == .playing {
             state = .paused
         }
-        activeTransportHost?.pause()
-        isBuffering = false
         #if os(iOS)
         // Paused while backgrounded with no PiP: the app will idle-suspend, so release the video pipeline
         // (wedge-safe, mirrors the unconditional background teardown). Audio backends are already spared.
