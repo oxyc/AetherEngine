@@ -5727,6 +5727,10 @@ public final class AetherEngine: ObservableObject {
     }
 
     public func play() {
+        // A command boundary, not evidence of a physical button: callers include recovery paths.
+        EngineLog.emit("[AetherEngine] transportCommand=engine.play clock=\(currentTime) "
+            + "background=\(isBackgrounded) nativeIntentBefore=\(nativeHost?.transportIntentIsPlaying ?? false)",
+            category: .engine)
         recordTransportDuringRebuild(playing: true)
         // AetherEngine#164: a VOD parked at its final frame (scrubbed to the end, or paused there)
         // cannot advance; AVPlayer.play() would no-op and leave the button frozen. Rewind to the start
@@ -5749,6 +5753,9 @@ public final class AetherEngine: ObservableObject {
     }
 
     public func pause() {
+        EngineLog.emit("[AetherEngine] transportCommand=engine.pause clock=\(currentTime) "
+            + "background=\(isBackgrounded) nativeIntentBefore=\(nativeHost?.transportIntentIsPlaying ?? false)",
+            category: .engine)
         recordTransportDuringRebuild(playing: false)
         resumeAfterInterruption = false
         activeTransportHost?.pause()

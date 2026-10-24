@@ -731,6 +731,7 @@ final class NativeAVPlayerHost {
                             + "but player parked (swallowed play() during item swap); re-issuing play()",
                             category: .engine
                         )
+                        self.logTransportCommand("readyToPlay.reassertPlay")
                         self.avPlayer.play()
                     }
                     if self.timeControlStatus == .playing {
@@ -1524,6 +1525,7 @@ final class NativeAVPlayerHost {
                 + String(format: "%.2f", reading.aheadSeconds) + "s)",
                 category: .engine
             )
+            self.logTransportCommand("liveJoin.playImmediately")
             self.avPlayer.playImmediately(atRate: rate)
         }
     }
@@ -1867,7 +1869,18 @@ final class NativeAVPlayerHost {
             + "the nearest \(where_) (playhead \(head))" + status
     }
 
+    /// Event-only provenance: distinguishes an engine-issued command from AVKit/remote changes
+    /// made directly to AVPlayer. Use the published clock, never synchronous item getters here.
+    private func logTransportCommand(_ command: StaticString) {
+        EngineLog.emit(
+            "[NativeAVPlayerHost] #\(sessionID) transportCommand=\(command) "
+            + "intentBefore=\(playIntent) rateBefore=\(rate) "
+            + "statusBefore=\(timeControlStatus.rawValue) clock=\(currentTime)",
+            category: .engine)
+    }
+
     func play() {
+        logTransportCommand("host.play")
         // Set intent before play() so readyToPlay observer can re-assert if the replaceCurrentItem swap swallowed it.
         playIntent = true
         // Call play() immediately (no defer-until-ready): item.status never advances past .unknown until AVPlayer is told to play.
@@ -1875,6 +1888,7 @@ final class NativeAVPlayerHost {
     }
 
     func pause() {
+        logTransportCommand("host.pause")
         playIntent = false
         avPlayer.pause()
     }
@@ -1966,6 +1980,7 @@ final class NativeAVPlayerHost {
         // The session may have been handed over while the seek was in flight; a retired session
         // must not restart the player under its successor.
         guard sessionID == sid else { return true }
+        logTransportCommand("prematureEndRecovery.play")
         avPlayer.play()
         prematureEndRecoveryInFlight = false
         waitingReason = avPlayer.reasonForWaitingToPlay
@@ -2160,6 +2175,8 @@ final class NativeAVPlayerHost {
     }
 
     func setRate(_ value: Float) {
+        logTransportCommand("host.setRate")
+        EngineLog.emit("[NativeAVPlayerHost] #\(sessionID) requestedRate=\(value)", category: .engine)
         // Non-zero rate counts as play intent (must survive replaceCurrentItem swap like play() does).
         playIntent = (value != 0)
         // #436: `play()` is rate 1.0 by definition, and it is re-issued from paths no client can see:
