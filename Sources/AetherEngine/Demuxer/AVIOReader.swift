@@ -2688,24 +2688,45 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
 
             if curPosition > frontier + Int64(Self.seekKeepForwardLimit) {
                 winCond.unlock()
-                // Far-forward seek. Serve from the detour cache ONLY if the block is already
-                // resident (e.g. the moov region the parser revisits); a genuine forward scrub
-                // misses and re-anchors the streaming window there, never chunk-serving forever.
+                // Far-forward read. A playback reposition (a forward scrub, a producer restart), or a
+                // detour run that has turned sequential past the re-anchor threshold, serves only a
+                // block that is already resident and otherwise re-anchors the streaming window here.
+                // Any other far-forward read is the forward half of a demuxer ping-pong (a flat MP4
+                // whose audio or subtitle samples sit after the video), so it fetches through the
+                // detour cache like the backward branch above instead of tearing the video window
+                // down at every switch.
                 if detourEligible {
+                    let anchorHere = repositionedForPlayback
+                        || (curPosition == detourRunNextExpected && detourRunBytes >= Self.detourReanchorBytes)
+                    let detourStart = DispatchTime.now()
                     switch serveFromDetour(into: buf.advanced(by: totalRead),
                                            maxLen: requestSize - totalRead,
-                                           at: curPosition, allowFetch: false) {
-                    case .served(let n, _):
-                        diag.recordDetourServe(ms: 0, fetched: false)   // resident-only path
+                                           at: curPosition, allowFetch: !anchorHere) {
+                    case .served(let n, let fetched):
+                        diag.recordDetourServe(ms: msSince(detourStart), fetched: fetched)
                         winCond.lock(); position = curPosition + Int64(n); winCond.broadcast(); winCond.unlock()
                         totalRead += n
-                        // No ladder reset and no phase: `allowFetch: false` cannot have crossed the
-                        // network, so this serve says nothing about an origin that is refusing
-                        // (#380/#410).
+                        // Only a serve that crossed the network is progress against the origin; a
+                        // resident hit says nothing about an origin that is refusing (#380/#410).
+                        if fetched {
+                            unproductiveReconnects = 0
+                            rateLimitStreak = 0
+                            rateLimitStreakStartedAt = nil
+                            emitNetworkPhase(.flowing)
+                        }
                         detourTrackSequential(at: curPosition, length: n)
                         continue
                     case .rateLimited, .miss:
-                        break   // allowFetch:false never rate-limits; a miss falls through to reconnect
+                        if anchorHere {
+                            detourResetRun()
+                            sweepIdleDetourBlocks(force: true)
+                        } else {
+                            // A failed fetch falls through to the reconnect below; account its time
+                            // first (#93/#96).
+                            diag.recordDetourFetchAttempt(ms: msSince(detourStart))
+                            if isClosed { return totalRead > 0 ? Int32(totalRead) : -1 }
+                            if readDeadlinePassedOrAborted { readDeadlineFired = true; return totalRead > 0 ? Int32(totalRead) : -1 }
+                        }
                     }
                 }
                 timedReconnect(seek: true, at: curPosition)

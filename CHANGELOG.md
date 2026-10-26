@@ -147,6 +147,14 @@ the public-API contract.
 
 ### Fixed
 
+- **A track stored far after the video no longer re-opens the connection at every switch.**
+  A flat MP4 whose audio or subtitle samples sit after the video makes the demuxer read past the
+  streaming window every few video packets. The far-forward branch served those only from a resident
+  detour block and otherwise re-anchored the window there, so each switch tore the video connection
+  down and opened a new one, and a slow origin stalled playback on every switch. Those reads now fetch
+  through the detour cache as backward reads already did; a playback reposition still anchors at the
+  landing.
+
 - **A refused HDR master no longer latches when the panel is shown to present HDR (AE#887).**
   A live PQ master refused with -11868 on an Apple TV whose output was fixed to 4K HDR latched the
   process-wide panel refusal, so every later HDR title went media-direct without its subtitle
