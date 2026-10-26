@@ -740,6 +740,10 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     // playback fast path never enters this code, so it carries zero overhead.
     private static let detourBlockSize = 4 * 1024 * 1024
     private static let detourMaxBlocks = 8                       // ~32 MB LRU ceiling
+    /// AE#909: how far the ceiling may grow while the working set outruns it, ~64 MB. A file that stores
+    /// each subtitle track in its own region keeps about one block per track live during playback, not
+    /// only during the parse; at 8 every block was evicted before its next read and fetched again.
+    private static let detourMaxBlocksGrown = 16
     /// Audit PERF-108: a detour block nobody has read or filled for this long is a scrub's leftover,
     /// not a parse's working set (a parser revisits its region within seconds).
     private static let detourBlockIdleSecondsDefault: TimeInterval = 30
@@ -1040,7 +1044,8 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// (see serveFromDetour), so eviction never shadows a re-fetchable tail. Pure copy/eviction
     /// math lives on the cache and is unit-tested without any network.
     private let detourCache = DetourBlockCache(blockSize: AVIOReader.detourBlockSize,
-                                               maxBlocks: AVIOReader.detourMaxBlocks)
+                                               maxBlocks: AVIOReader.detourMaxBlocks,
+                                               grownMaxBlocks: AVIOReader.detourMaxBlocksGrown)
     /// When the detour cache was last swept for idle blocks (audit PERF-108). Demux-thread-only.
     private var lastDetourIdleSweepNs: UInt64 = 0
     /// How long a detour block may sit unread before the sweep releases it. An init parameter for
@@ -5033,14 +5038,25 @@ final class DetourBlockCache: @unchecked Sendable {
     private var lru: [Int64] = []
     /// When each resident block was last inserted or served, on `now`'s clock (audit PERF-108).
     private var lastHit: [Int64: TimeInterval] = [:]
-    private let maxBlocks: Int
+    private let baseMaxBlocks: Int
+    private let grownMaxBlocks: Int
+    /// The ceiling in force: `baseMaxBlocks`, raised by one each time a block the ceiling evicted is
+    /// inserted again, up to `grownMaxBlocks` (AE#909). Idle release brings it back down.
+    private var maxBlocks: Int
+    /// Indices the ceiling evicted, oldest first, at most `grownMaxBlocks` of them. Indices only, no data.
+    /// A block that comes back after more evictions than that belongs to a working set the grown ceiling
+    /// could not hold either, so it does not count.
+    private var evictedByCeiling: [Int64] = []
     private let now: @Sendable () -> TimeInterval
     let blockSize: Int
 
-    /// `now` is injectable so the idle test moves a clock instead of waiting one out.
-    init(blockSize: Int, maxBlocks: Int,
+    /// `now` is injectable so the idle test moves a clock instead of waiting one out. `grownMaxBlocks`
+    /// defaults to `maxBlocks`, a fixed ceiling.
+    init(blockSize: Int, maxBlocks: Int, grownMaxBlocks: Int? = nil,
          now: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
         self.blockSize = blockSize
+        self.baseMaxBlocks = maxBlocks
+        self.grownMaxBlocks = max(maxBlocks, grownMaxBlocks ?? maxBlocks)
         self.maxBlocks = maxBlocks
         self.now = now
     }
@@ -5057,23 +5073,35 @@ final class DetourBlockCache: @unchecked Sendable {
         return data
     }
 
-    /// Inserts a (full-size) block, evicting the least-recently-used tail beyond `maxBlocks`.
+    /// Inserts a (full-size) block, evicting the least-recently-used tail beyond `maxBlocks`. A block the
+    /// ceiling evicted coming back is the working set outrunning the ceiling (AE#909): every block of a
+    /// working set one larger than the ceiling is evicted just before its next read, so each read
+    /// fetches again. That raises the ceiling by one, up to `grownMaxBlocks`.
     func insert(_ idx: Int64, _ data: Data) {
         lock.lock(); defer { lock.unlock() }
-        if blocks[idx] == nil { lru.append(idx) }
+        if blocks[idx] == nil {
+            if let i = evictedByCeiling.firstIndex(of: idx) {
+                evictedByCeiling.remove(at: i)
+                maxBlocks = min(grownMaxBlocks, maxBlocks + 1)
+            }
+            lru.append(idx)
+        }
         blocks[idx] = data
         lastHit[idx] = now()
         while lru.count > maxBlocks {
             let evicted = lru.removeFirst()
             blocks.removeValue(forKey: evicted)
             lastHit[evicted] = nil
+            evictedByCeiling.append(evicted)
+            if evictedByCeiling.count > grownMaxBlocks { evictedByCeiling.removeFirst() }
         }
     }
 
     /// Drops every block nothing has read or filled for `seconds`, and returns how many went. The
-    /// cache is otherwise only emptied at close, so the blocks of a backward scrub (up to 32 MB)
+    /// cache is otherwise only emptied at close, so the blocks of a backward scrub (up to the ceiling)
     /// outlived the scrub for the whole session (audit PERF-108). Age rather than a clear at the
-    /// re-anchor, because a parser ping-ponging through a region keeps hitting its blocks.
+    /// re-anchor, because a parser ping-ponging through a region keeps hitting its blocks. A grown
+    /// ceiling (AE#909) comes back down to what is still resident, never below `baseMaxBlocks`.
     @discardableResult
     func evictIdle(olderThan seconds: TimeInterval) -> Int {
         lock.lock(); defer { lock.unlock() }
@@ -5086,6 +5114,8 @@ final class DetourBlockCache: @unchecked Sendable {
             blocks.removeValue(forKey: idx)
             lastHit[idx] = nil
         }
+        maxBlocks = max(baseMaxBlocks, lru.count)
+        evictedByCeiling.removeAll()
         return idle.count
     }
 
@@ -5094,12 +5124,20 @@ final class DetourBlockCache: @unchecked Sendable {
         blocks.removeAll()
         lru.removeAll()
         lastHit.removeAll()
+        maxBlocks = baseMaxBlocks
+        evictedByCeiling.removeAll()
         lock.unlock()
     }
 
     var residentCount: Int {
         lock.lock(); defer { lock.unlock() }
         return blocks.count
+    }
+
+    /// The ceiling currently in force (AE#909).
+    var currentMaxBlocks: Int {
+        lock.lock(); defer { lock.unlock() }
+        return maxBlocks
     }
 
     /// Copy up to `maxLen` bytes covering `offset` from the resident block into `dst`, returning the

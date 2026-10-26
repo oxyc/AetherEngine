@@ -179,6 +179,145 @@ struct DetourBlockCacheTests {
         #expect(cache.residentCount == 0)
         #expect(cache.block(0) == nil)
     }
+
+    /// Reads `rounds` passes over `regions` blocks the way the detour path does (serve, else fetch and
+    /// insert) and returns how many fetches each pass made.
+    private func fetchesPerPass(_ cache: DetourBlockCache, regions: Int, rounds: Int) -> [Int] {
+        (0..<rounds).map { _ in
+            (0..<regions).reduce(0) { fetches, i in
+                if cache.block(Int64(i)) != nil { return fetches }
+                cache.insert(Int64(i), patternBlock(base: i * 16))
+                return fetches + 1
+            }
+        }
+    }
+
+    // AE#909: a file that stores each subtitle track in its own region keeps more blocks live than the
+    // ceiling holds, and LRU then evicts every block just before its next read.
+    @Test("a working set larger than the ceiling grows it until a pass fetches nothing")
+    func ceilingGrowsToTheWorkingSet() {
+        let cache = DetourBlockCache(blockSize: 16, maxBlocks: 3, grownMaxBlocks: 8)
+        let fetches = fetchesPerPass(cache, regions: 5, rounds: 4)
+        #expect(fetches.first == 5)
+        #expect(fetches.last == 0, "passes fetched \(fetches)")
+        #expect(cache.currentMaxBlocks == 5)
+    }
+
+    @Test("a fixed ceiling keeps fetching every block of a working set one larger than it")
+    func fixedCeilingThrashes() {
+        let cache = DetourBlockCache(blockSize: 16, maxBlocks: 3)
+        #expect(fetchesPerPass(cache, regions: 4, rounds: 4) == [4, 4, 4, 4])
+        #expect(cache.currentMaxBlocks == 3)
+    }
+
+    @Test("the ceiling does not grow past grownMaxBlocks")
+    func growthIsBounded() {
+        let cache = DetourBlockCache(blockSize: 16, maxBlocks: 3, grownMaxBlocks: 5)
+        _ = fetchesPerPass(cache, regions: 6, rounds: 6)
+        #expect(cache.currentMaxBlocks == 5)
+        #expect(cache.residentCount == 5)
+    }
+
+    @Test("a working set the grown ceiling could not hold either does not grow it")
+    func noGrowthBeyondReach() {
+        // Nine blocks read in turn miss on every read under any ceiling below nine, so growing to five
+        // would only hold more memory for the same fetches.
+        let cache = DetourBlockCache(blockSize: 16, maxBlocks: 3, grownMaxBlocks: 5)
+        #expect(fetchesPerPass(cache, regions: 9, rounds: 4) == [9, 9, 9, 9])
+        #expect(cache.currentMaxBlocks == 3)
+    }
+
+    @Test("a working set within the ceiling never grows it")
+    func noGrowthWithinTheCeiling() {
+        let cache = DetourBlockCache(blockSize: 16, maxBlocks: 3, grownMaxBlocks: 8)
+        #expect(fetchesPerPass(cache, regions: 3, rounds: 4) == [3, 0, 0, 0])
+        // Blocks passing through once, as a scrub fills them, are evicted but never read again.
+        for i in 10..<20 { cache.insert(Int64(i), patternBlock(base: i * 16)) }
+        #expect(cache.currentMaxBlocks == 3)
+    }
+
+    @Test("idle release brings a grown ceiling back to what is still resident, never below the base")
+    func idleReleaseShrinksTheCeiling() {
+        let clock = ManualClock()
+        let cache = DetourBlockCache(blockSize: 16, maxBlocks: 3, grownMaxBlocks: 8, now: { clock.now })
+        _ = fetchesPerPass(cache, regions: 6, rounds: 3)
+        #expect(cache.currentMaxBlocks == 6)
+
+        clock.advance(20)
+        for i in 0..<4 { _ = cache.block(Int64(i)) }
+        clock.advance(20)
+        #expect(cache.evictIdle(olderThan: 30) == 2)
+        #expect(cache.currentMaxBlocks == 4)
+
+        clock.advance(31)
+        #expect(cache.evictIdle(olderThan: 30) == 4)
+        #expect(cache.currentMaxBlocks == 3)
+    }
+
+    @Test("clear returns a grown ceiling to the base")
+    func clearResetsTheCeiling() {
+        let cache = DetourBlockCache(blockSize: 16, maxBlocks: 3, grownMaxBlocks: 8)
+        _ = fetchesPerPass(cache, regions: 6, rounds: 3)
+        cache.clear()
+        #expect(cache.currentMaxBlocks == 3)
+        #expect(fetchesPerPass(cache, regions: 4, rounds: 1) == [4])
+        #expect(cache.currentMaxBlocks == 3, "an index evicted before the clear does not count afterwards")
+    }
+}
+
+/// AE#909, through the reader: a demuxer reading twelve regions behind the streaming window, the way a
+/// flat MP4 with one region per subtitle track is read during playback.
+@Suite("Detour cache grows to the reader's working set")
+struct DetourCacheWorkingSetReaderTests {
+
+    private static let chunk = 256 * 1024
+    private static let block: Int64 = 4 * 1024 * 1024
+
+    @Test("a third pass over twelve regions behind the window fetches nothing", .timeLimit(.minutes(2)))
+    func repeatedPassesStopFetching() throws {
+        let server = try #require(ThrottledOriginServer(totalSize: 128 * 1024 * 1024, throttleUs: 1000, patternedBody: true))
+        defer { server.stop() }
+        // The detour fetch's interactive budget is a wall clock; see Issue782RestartReanchorTests. So is
+        // idle release: on a loaded runner a pass can outlast its 30 s, and the release would shrink the
+        // ceiling between passes. What is measured here is growth, not release.
+        let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(server.port)/movie.bin")!,
+                                detourIdleSeconds: 3600, detourFetchBudget: 30)
+        defer { reader.markClosed(); reader.close() }
+        try reader.open()
+        reader.markOpenPhaseFinished()
+
+        let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: Self.chunk)
+        defer { buf.deallocate() }
+        var read = 0
+        while read < 80 * 1024 * 1024 {
+            let n = Int(reader.read(into: buf, size: Int32(Self.chunk)))
+            #expect(n > 0, "forward read failed at \(read)")
+            if n <= 0 { return }
+            read += n
+        }
+
+        func blockFetches() -> Int {
+            server.requestedRanges.filter { range in
+                guard let end = range.end else { return false }
+                return end - range.start + 1 == Self.block
+            }.count
+        }
+        var perPass: [Int] = []
+        for _ in 0..<3 {
+            let before = blockFetches()
+            for region in 0..<12 {
+                let offset = Int64(region) * Self.block + 4321
+                #expect(reader.seek(offset: offset, whence: Int32(SEEK_SET)) == offset)
+                let n = Int(reader.read(into: buf, size: Int32(Self.chunk)))
+                #expect(n > 0)
+                #expect((0..<n).allSatisfy { buf[$0] == ThrottledOriginServer.patternByte(at: offset + Int64($0)) },
+                        "region \(region) served the wrong bytes")
+            }
+            perPass.append(blockFetches() - before)
+        }
+        #expect(perPass.first == 12, "the first pass did not fetch each region as a detour block: \(perPass)")
+        #expect(perPass.last == 0, "passes fetched \(perPass)")
+    }
 }
 
 /// Issue #71: under a sustained 429, parse-driven seekReconnect kept resetting unproductiveReconnects

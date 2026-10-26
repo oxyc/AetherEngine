@@ -17,6 +17,14 @@ the public-API contract.
   panel repeated a frame about every 42 s. A probe within 0.005 of 24.000 now snaps to 24; a Matroska track with
   DefaultDuration probes as an exact 24/1 or 24000/1001, so 23.976 sources and noisier probes keep 23.976.
 
+- **The detour cache grows to a working set larger than its 8 blocks (AE#909).** An MP4 that stores each
+  subtitle track in its own region keeps about one block per track live during playback, because every
+  embedded subtitle track is harvested. With 14 such tracks the LRU evicted each block just before its
+  next read, so the same blocks were fetched over and over, and against an origin that takes a few
+  hundred milliseconds per request playback rebuffered every 10 to 30 s. A block the ceiling evicted being
+  fetched again now raises the ceiling by one, up to 16 blocks (~64 MB); idle release brings it back down,
+  never below 8. A working set within 8 blocks, and blocks a scrub passes through once, never grow it.
+
 ## [7.48.0] - 2026-10-26
 
 ### Added
